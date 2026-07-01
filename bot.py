@@ -296,8 +296,9 @@ class PointeuseView(discord.ui.View):
         set_services(services)
 
         await interaction.response.send_message(
-            f"🔴 Fin de service pour {interaction.user.mention} en tant que **{grade}**.\n"
+            f"🔴 Fin de service enregistrée en tant que **{grade}**.\n"
             f"Durée : **{duree_heures:.2f} h** — Montant : **{montant:.2f} €**",
+            ephemeral=True,
         )
 
 
