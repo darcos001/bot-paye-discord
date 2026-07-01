@@ -27,6 +27,7 @@ from discord.ext import commands
 TOKEN = os.getenv("DISCORD_TOKEN")  # Le token est lu depuis une variable d'environnement
 GRADES_FILE = "grades.json"       # {"grade_nom": taux_horaire}
 SERVICES_FILE = "services.json"   # {"user_id": [ {grade, heures, date, paye} ]}
+SESSIONS_FILE = "sessions.json"   # {"user_id": {"grade": ..., "debut": iso}}  (services en cours)
 
 # Nom du rôle Discord autorisé à administrer le bot (modifier si besoin)
 ADMIN_ROLE_NAME = "Admin Paye"
@@ -66,12 +67,33 @@ def set_services(data: dict):
     sauver_json(SERVICES_FILE, data)
 
 
+def get_sessions() -> dict:
+    return charger_json(SESSIONS_FILE, {})
+
+
+def set_sessions(data: dict):
+    sauver_json(SESSIONS_FILE, data)
+
+
 def est_admin(interaction: discord.Interaction) -> bool:
     """Vérifie si l'utilisateur peut administrer le bot (permission serveur OU rôle dédié)."""
     if interaction.user.guild_permissions.administrator:
         return True
     role_names = [r.name for r in getattr(interaction.user, "roles", [])]
     return ADMIN_ROLE_NAME in role_names
+
+
+def detecter_grade(membre: discord.Member) -> list[str]:
+    """
+    Détecte le(s) grade(s) correspondant aux rôles Discord du membre.
+    Un grade est reconnu si un rôle du membre porte exactement le même nom
+    qu'un grade créé avec /grade_set. Retourne la liste des grades trouvés,
+    triée du rôle le plus haut (le plus senior) au plus bas dans la hiérarchie.
+    """
+    grades = get_grades()
+    roles_du_membre = sorted(membre.roles, key=lambda r: r.position, reverse=True)
+    grades_trouves = [r.name for r in roles_du_membre if r.name in grades]
+    return grades_trouves
 
 
 # ---------------------------------------------------------------------------
@@ -86,12 +108,217 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 @bot.event
 async def on_ready():
+    bot.add_view(PointeuseView())  # Rend les boutons de la pointeuse actifs après un redémarrage
     try:
         synced = await bot.tree.sync()
         print(f"{len(synced)} commande(s) slash synchronisée(s).")
     except Exception as e:
         print(f"Erreur de synchronisation : {e}")
     print(f"Connecté en tant que {bot.user} (ID: {bot.user.id})")
+
+
+# ---------------------------------------------------------------------------
+# POINTEUSE - PRISE / FIN DE SERVICE PAR BOUTONS
+# ---------------------------------------------------------------------------
+
+class GradeSelect(discord.ui.Select):
+    """Menu déroulant affiché après le clic sur 'Prise de service' pour choisir le grade."""
+
+    def __init__(self):
+        grades = get_grades()
+        options = [
+            discord.SelectOption(label=grade, description=f"{taux:.2f} €/h")
+            for grade, taux in grades.items()
+        ][:25]  # Discord limite à 25 options max
+        super().__init__(
+            placeholder="Choisis ton grade pour cette prise de service",
+            options=options,
+            custom_id="pointeuse_grade_select",
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        grade_choisi = self.values[0]
+        sessions = get_sessions()
+        user_id = str(interaction.user.id)
+
+        if user_id in sessions:
+            await interaction.response.edit_message(
+                content="⚠️ Tu as déjà une prise de service en cours.", view=None
+            )
+            return
+
+        sessions[user_id] = {
+            "grade": grade_choisi,
+            "debut": datetime.now(timezone.utc).isoformat(),
+        }
+        set_sessions(sessions)
+
+        await interaction.response.edit_message(
+            content=(
+                f"🟢 Prise de service enregistrée en tant que **{grade_choisi}** "
+                f"à {datetime.now(timezone.utc).strftime('%H:%M UTC')}.\n"
+                f"Clique sur **Fin de service** quand tu auras terminé."
+            ),
+            view=None,
+        )
+
+
+class GradeSelectView(discord.ui.View):
+    """Vue temporaire (éphémère) contenant le menu de sélection de grade."""
+
+    def __init__(self):
+        super().__init__(timeout=120)
+        self.add_item(GradeSelect())
+
+
+class PointeuseView(discord.ui.View):
+    """Vue persistante avec les boutons Prise de service / Fin de service."""
+
+    def __init__(self):
+        super().__init__(timeout=None)  # timeout=None => la vue reste active indéfiniment
+
+    @discord.ui.button(
+        label="Prise de service",
+        emoji="🟢",
+        style=discord.ButtonStyle.success,
+        custom_id="pointeuse_debut",
+    )
+    async def prise_service(self, interaction: discord.Interaction, button: discord.ui.Button):
+        sessions = get_sessions()
+        user_id = str(interaction.user.id)
+
+        if user_id in sessions:
+            await interaction.response.send_message(
+                "⚠️ Tu as déjà une prise de service en cours. Utilise **Fin de service** pour la clôturer.",
+                ephemeral=True,
+            )
+            return
+
+        grades = get_grades()
+        if not grades:
+            await interaction.response.send_message(
+                "Aucun grade n'a encore été configuré. Demande à un admin d'utiliser `/grade_set`.",
+                ephemeral=True,
+            )
+            return
+
+        grades_detectes = detecter_grade(interaction.user)
+
+        if not grades_detectes:
+            # Aucun rôle Discord ne correspond à un grade connu -> on demande de choisir manuellement
+            await interaction.response.send_message(
+                "Aucun rôle correspondant à un grade connu n'a été trouvé sur ton profil.\n"
+                "Sélectionne ton grade manuellement, ou demande à un admin de vérifier tes rôles :",
+                view=GradeSelectView(),
+                ephemeral=True,
+            )
+            return
+
+        if len(grades_detectes) > 1:
+            # Plusieurs rôles correspondent à des grades -> le membre choisit lequel utiliser
+            await interaction.response.send_message(
+                f"Plusieurs grades détectés sur ton profil ({', '.join(grades_detectes)}). "
+                "Sélectionne celui à utiliser pour cette prise de service :",
+                view=GradeSelectView(),
+                ephemeral=True,
+            )
+            return
+
+        # Un seul grade détecté -> démarrage automatique, sans menu déroulant
+        grade_choisi = grades_detectes[0]
+        sessions = get_sessions()
+        user_id = str(interaction.user.id)
+
+        if user_id in sessions:
+            await interaction.response.send_message(
+                "⚠️ Tu as déjà une prise de service en cours. Utilise **Fin de service** pour la clôturer.",
+                ephemeral=True,
+            )
+            return
+
+        sessions[user_id] = {
+            "grade": grade_choisi,
+            "debut": datetime.now(timezone.utc).isoformat(),
+        }
+        set_sessions(sessions)
+
+        await interaction.response.send_message(
+            f"🟢 Prise de service enregistrée en tant que **{grade_choisi}** "
+            f"(détecté automatiquement) à {datetime.now(timezone.utc).strftime('%H:%M UTC')}.\n"
+            f"Clique sur **Fin de service** quand tu auras terminé.",
+            ephemeral=True,
+        )
+
+    @discord.ui.button(
+        label="Fin de service",
+        emoji="🔴",
+        style=discord.ButtonStyle.danger,
+        custom_id="pointeuse_fin",
+    )
+    async def fin_service(self, interaction: discord.Interaction, button: discord.ui.Button):
+        sessions = get_sessions()
+        user_id = str(interaction.user.id)
+
+        if user_id not in sessions:
+            await interaction.response.send_message(
+                "Tu n'as pas de prise de service en cours.", ephemeral=True
+            )
+            return
+
+        session = sessions.pop(user_id)
+        set_sessions(sessions)
+
+        debut = datetime.fromisoformat(session["debut"])
+        fin = datetime.now(timezone.utc)
+        duree_heures = (fin - debut).total_seconds() / 3600
+        grade = session["grade"]
+
+        if duree_heures < (1 / 60):  # moins d'une minute : on ignore, probable erreur de clic
+            await interaction.response.send_message(
+                "Service trop court (< 1 minute), il n'a pas été enregistré.", ephemeral=True
+            )
+            return
+
+        grades = get_grades()
+        taux = grades.get(grade, 0)
+        montant = duree_heures * taux
+
+        services = get_services()
+        services.setdefault(user_id, [])
+        services[user_id].append(
+            {
+                "grade": grade,
+                "heures": round(duree_heures, 2),
+                "date": fin.isoformat(),
+                "paye": False,
+            }
+        )
+        set_services(services)
+
+        await interaction.response.send_message(
+            f"🔴 Fin de service pour {interaction.user.mention} en tant que **{grade}**.\n"
+            f"Durée : **{duree_heures:.2f} h** — Montant : **{montant:.2f} €**",
+        )
+
+
+@bot.tree.command(name="pointeuse", description="Publier le panneau de prise/fin de service (boutons)")
+async def pointeuse(interaction: discord.Interaction):
+    if not est_admin(interaction):
+        await interaction.response.send_message(
+            "Tu n'as pas la permission d'utiliser cette commande.", ephemeral=True
+        )
+        return
+
+    embed = discord.Embed(
+        title="🕒 Pointeuse de service",
+        description=(
+            "Clique sur **Prise de service** au début de ton service "
+            "et sur **Fin de service** quand tu as terminé.\n\n"
+            "Les heures sont calculées et enregistrées automatiquement."
+        ),
+        color=discord.Color.blurple(),
+    )
+    await interaction.response.send_message(embed=embed, view=PointeuseView())
 
 
 # ---------------------------------------------------------------------------
