@@ -32,6 +32,22 @@ SESSIONS_FILE = "sessions.json"   # {"user_id": {"grade": ..., "debut": iso}}  (
 # Nom du rôle Discord autorisé à administrer le bot (modifier si besoin)
 ADMIN_ROLE_NAME = "Admin Paye"
 
+# Hiérarchie des grades, du plus bas au plus haut (utilisée par /rankup et /derank).
+# ⚠️ Chaque nom doit correspondre EXACTEMENT au nom d'un rôle Discord existant sur le serveur.
+HIERARCHIE = [
+    "Stagiaire",
+    "Secouriste",
+    "Ambulancier",
+    "Aide-soignant",
+    "Infirmier",
+    "Infirmier en Chef",
+    "Docteur",
+    "Médecin",
+    "Médecin Chef",
+    "Chef de Service",
+    "Co-Directeur",
+]
+
 # ---------------------------------------------------------------------------
 # UTILITAIRES DE STOCKAGE
 # ---------------------------------------------------------------------------
@@ -570,7 +586,160 @@ async def paye_valider(interaction: discord.Interaction, membre: discord.Member)
 
 
 # ---------------------------------------------------------------------------
-# LANCEMENT DU BOT
+# SYSTÈME DE HIÉRARCHIE - RANKUP / DERANK
+# ---------------------------------------------------------------------------
+
+def obtenir_rang_actuel(membre: discord.Member):
+    """
+    Retourne (index, nom_du_grade) du rang actuel du membre dans la HIERARCHIE,
+    ou (None, None) si le membre n'a aucun rôle de la hiérarchie.
+    Si le membre a plusieurs rôles de la hiérarchie (cas anormal), le plus haut est retourné.
+    """
+    noms_roles_membre = {r.name for r in membre.roles}
+    rangs_trouves = [
+        (i, grade) for i, grade in enumerate(HIERARCHIE) if grade in noms_roles_membre
+    ]
+    if not rangs_trouves:
+        return None, None
+    # Si plusieurs rôles hiérarchiques sont présents, on garde le plus haut (index le plus grand)
+    return max(rangs_trouves, key=lambda x: x[0])
+
+
+async def changer_role_hierarchie(
+    interaction: discord.Interaction, membre: discord.Member, ancien_grade: str | None, nouveau_grade: str
+):
+    """Retire l'ancien rôle de hiérarchie (s'il existe) et attribue le nouveau. Retourne (succès, message_erreur)."""
+    guild = interaction.guild
+    nouveau_role = discord.utils.get(guild.roles, name=nouveau_grade)
+
+    if nouveau_role is None:
+        return False, (
+            f"❌ Le rôle Discord **{nouveau_grade}** n'existe pas sur ce serveur. "
+            f"Crée-le d'abord (Paramètres du serveur → Rôles) avec ce nom exact."
+        )
+
+    try:
+        if ancien_grade is not None:
+            ancien_role = discord.utils.get(guild.roles, name=ancien_grade)
+            if ancien_role is not None and ancien_role in membre.roles:
+                await membre.remove_roles(ancien_role, reason="Changement de grade via /rankup ou /derank")
+        await membre.add_roles(nouveau_role, reason="Changement de grade via /rankup ou /derank")
+    except discord.Forbidden:
+        return False, (
+            "❌ Je n'ai pas la permission de gérer les rôles. Vérifie que :\n"
+            "- Le bot a la permission **Gérer les rôles**\n"
+            "- Le rôle du bot est placé **au-dessus** des rôles de la hiérarchie dans "
+            "Paramètres du serveur → Rôles"
+        )
+
+    return True, None
+
+
+@bot.tree.command(name="rankup", description="Faire monter un membre d'un grade dans la hiérarchie")
+@app_commands.describe(membre="Le membre à faire monter en grade")
+async def rankup(interaction: discord.Interaction, membre: discord.Member):
+    if not est_admin(interaction):
+        await interaction.response.send_message(
+            "Tu n'as pas la permission d'utiliser cette commande.", ephemeral=True
+        )
+        return
+
+    index_actuel, grade_actuel = obtenir_rang_actuel(membre)
+
+    if index_actuel is None:
+        # Le membre n'a aucun grade de la hiérarchie -> on lui attribue le premier (Stagiaire)
+        nouveau_grade = HIERARCHIE[0]
+        succes, erreur = await changer_role_hierarchie(interaction, membre, None, nouveau_grade)
+        if not succes:
+            await interaction.response.send_message(erreur, ephemeral=True)
+            return
+        await interaction.response.send_message(
+            f"⬆️ {membre.mention} commence maintenant au grade **{nouveau_grade}**."
+        )
+        return
+
+    if index_actuel >= len(HIERARCHIE) - 1:
+        await interaction.response.send_message(
+            f"{membre.mention} est déjà au grade le plus élevé (**{grade_actuel}**).", ephemeral=True
+        )
+        return
+
+    nouveau_grade = HIERARCHIE[index_actuel + 1]
+    succes, erreur = await changer_role_hierarchie(interaction, membre, grade_actuel, nouveau_grade)
+    if not succes:
+        await interaction.response.send_message(erreur, ephemeral=True)
+        return
+
+    await interaction.response.send_message(
+        f"⬆️ {membre.mention} passe de **{grade_actuel}** à **{nouveau_grade}** !"
+    )
+
+
+@bot.tree.command(name="derank", description="Faire descendre un membre d'un grade dans la hiérarchie")
+@app_commands.describe(membre="Le membre à faire descendre en grade")
+async def derank(interaction: discord.Interaction, membre: discord.Member):
+    if not est_admin(interaction):
+        await interaction.response.send_message(
+            "Tu n'as pas la permission d'utiliser cette commande.", ephemeral=True
+        )
+        return
+
+    index_actuel, grade_actuel = obtenir_rang_actuel(membre)
+
+    if index_actuel is None:
+        await interaction.response.send_message(
+            f"{membre.mention} n'a aucun grade de la hiérarchie actuellement.", ephemeral=True
+        )
+        return
+
+    if index_actuel == 0:
+        await interaction.response.send_message(
+            f"{membre.mention} est déjà au grade le plus bas (**{grade_actuel}**). "
+            "Impossible de descendre davantage.",
+            ephemeral=True,
+        )
+        return
+
+    nouveau_grade = HIERARCHIE[index_actuel - 1]
+    succes, erreur = await changer_role_hierarchie(interaction, membre, grade_actuel, nouveau_grade)
+    if not succes:
+        await interaction.response.send_message(erreur, ephemeral=True)
+        return
+
+    await interaction.response.send_message(
+        f"⬇️ {membre.mention} descend de **{grade_actuel}** à **{nouveau_grade}**."
+    )
+
+
+@bot.tree.command(name="rang", description="Afficher le grade actuel d'un membre dans la hiérarchie")
+@app_commands.describe(membre="Le membre à consulter")
+async def rang(interaction: discord.Interaction, membre: discord.Member):
+    index_actuel, grade_actuel = obtenir_rang_actuel(membre)
+
+    if index_actuel is None:
+        await interaction.response.send_message(
+            f"{membre.mention} n'a aucun grade de la hiérarchie actuellement."
+        )
+        return
+
+    position = f"{index_actuel + 1}/{len(HIERARCHIE)}"
+    await interaction.response.send_message(
+        f"📊 {membre.mention} est actuellement **{grade_actuel}** (rang {position})."
+    )
+
+
+@bot.tree.command(name="hierarchie", description="Afficher l'ordre complet de la hiérarchie des grades")
+async def hierarchie(interaction: discord.Interaction):
+    lignes = [f"{i + 1}. {grade}" for i, grade in enumerate(HIERARCHIE)]
+    embed = discord.Embed(
+        title="🏅 Hiérarchie des grades",
+        description="\n".join(lignes),
+        color=discord.Color.purple(),
+    )
+    await interaction.response.send_message(embed=embed)
+
+
+
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
