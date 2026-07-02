@@ -28,6 +28,7 @@ TOKEN = os.getenv("DISCORD_TOKEN")  # Le token est lu depuis une variable d'envi
 GRADES_FILE = "grades.json"       # {"grade_nom": taux_horaire}
 SERVICES_FILE = "services.json"   # {"user_id": [ {grade, heures, date, paye} ]}
 SESSIONS_FILE = "sessions.json"   # {"user_id": {"grade": ..., "debut": iso}}  (services en cours)
+PANEL_FILE = "panel.json"         # {"channel_id": ..., "message_id": ...}  (panel live "en service")
 
 # Nom du rôle Discord autorisé à administrer le bot (modifier si besoin)
 ADMIN_ROLE_NAME = "Admin Paye"
@@ -91,6 +92,14 @@ def set_sessions(data: dict):
     sauver_json(SESSIONS_FILE, data)
 
 
+def get_panel() -> dict:
+    return charger_json(PANEL_FILE, {})
+
+
+def set_panel(data: dict):
+    sauver_json(PANEL_FILE, data)
+
+
 def est_admin(interaction: discord.Interaction) -> bool:
     """Vérifie si l'utilisateur peut administrer le bot (permission serveur OU rôle dédié)."""
     if interaction.user.guild_permissions.administrator:
@@ -130,7 +139,74 @@ async def on_ready():
         print(f"{len(synced)} commande(s) slash synchronisée(s).")
     except Exception as e:
         print(f"Erreur de synchronisation : {e}")
+    await rafraichir_panel(bot)  # Resynchronise le panel live après un redémarrage
     print(f"Connecté en tant que {bot.user} (ID: {bot.user.id})")
+
+
+# ---------------------------------------------------------------------------
+# PANEL LIVE - LISTE DES PERSONNES ACTUELLEMENT EN SERVICE
+# ---------------------------------------------------------------------------
+
+def formater_duree(debut: datetime) -> str:
+    """Retourne une durée écoulée lisible (ex: '1h 24min') depuis un datetime de début."""
+    delta = datetime.now(timezone.utc) - debut
+    total_min = int(delta.total_seconds() // 60)
+    heures, minutes = divmod(total_min, 60)
+    if heures > 0:
+        return f"{heures}h {minutes:02d}min"
+    return f"{minutes}min"
+
+
+def construire_embed_panel() -> discord.Embed:
+    """Construit l'embed listant toutes les personnes actuellement en service."""
+    sessions = get_sessions()
+
+    embed = discord.Embed(
+        title="🟢 En service actuellement",
+        color=discord.Color.green() if sessions else discord.Color.greyple(),
+    )
+
+    if not sessions:
+        embed.description = "Personne n'est actuellement en service."
+    else:
+        # Trie par heure de début (les plus anciens en premier)
+        elements = sorted(sessions.items(), key=lambda kv: kv[1]["debut"])
+        lignes = []
+        for user_id, session in elements:
+            debut = datetime.fromisoformat(session["debut"])
+            grade = session["grade"]
+            duree = formater_duree(debut)
+            lignes.append(f"🟢 <@{user_id}> — **{grade}** — depuis {duree}")
+        embed.description = "\n".join(lignes)
+        embed.set_footer(text=f"{len(sessions)} personne(s) en service")
+
+    embed.timestamp = datetime.now(timezone.utc)
+    return embed
+
+
+async def rafraichir_panel(bot: commands.Bot):
+    """Met à jour le message du panel live (s'il a déjà été posté via /panel_service)."""
+    panel = get_panel()
+    channel_id = panel.get("channel_id")
+    message_id = panel.get("message_id")
+
+    if not channel_id or not message_id:
+        return  # Aucun panel n'a encore été posté, rien à faire
+
+    channel = bot.get_channel(channel_id)
+    if channel is None:
+        try:
+            channel = await bot.fetch_channel(channel_id)
+        except discord.HTTPException:
+            return
+
+    try:
+        message = await channel.fetch_message(message_id)
+        await message.edit(embed=construire_embed_panel())
+    except discord.NotFound:
+        pass  # Le message a été supprimé manuellement, on ignore
+    except discord.HTTPException:
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -177,6 +253,7 @@ class GradeSelect(discord.ui.Select):
             ),
             view=None,
         )
+        await rafraichir_panel(interaction.client)
 
 
 class GradeSelectView(discord.ui.View):
@@ -264,6 +341,7 @@ class PointeuseView(discord.ui.View):
             f"Clique sur **Fin de service** quand tu auras terminé.",
             ephemeral=True,
         )
+        await rafraichir_panel(interaction.client)
 
     @discord.ui.button(
         label="Fin de service",
@@ -316,6 +394,21 @@ class PointeuseView(discord.ui.View):
             f"Durée : **{duree_heures:.2f} h** — Montant : **{montant:.2f} €**",
             ephemeral=True,
         )
+        await rafraichir_panel(interaction.client)
+
+
+@bot.tree.command(name="panel_service", description="Publier le panel live des personnes actuellement en service")
+async def panel_service(interaction: discord.Interaction):
+    if not est_admin(interaction):
+        await interaction.response.send_message(
+            "Tu n'as pas la permission d'utiliser cette commande.", ephemeral=True
+        )
+        return
+
+    await interaction.response.send_message(embed=construire_embed_panel())
+    message = await interaction.original_response()
+
+    set_panel({"channel_id": interaction.channel_id, "message_id": message.id})
 
 
 @bot.tree.command(name="pointeuse", description="Publier le panneau de prise/fin de service (boutons)")
