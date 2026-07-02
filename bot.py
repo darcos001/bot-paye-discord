@@ -14,6 +14,7 @@ Toutes les données sont sauvegardées dans des fichiers JSON locaux
 
 import json
 import os
+import unicodedata
 from datetime import datetime, timezone
 
 import discord
@@ -28,7 +29,6 @@ TOKEN = os.getenv("DISCORD_TOKEN")  # Le token est lu depuis une variable d'envi
 GRADES_FILE = "grades.json"       # {"grade_nom": taux_horaire}
 SERVICES_FILE = "services.json"   # {"user_id": [ {grade, heures, date, paye} ]}
 SESSIONS_FILE = "sessions.json"   # {"user_id": {"grade": ..., "debut": iso}}  (services en cours)
-PANEL_FILE = "panel.json"         # {"channel_id": ..., "message_id": ...}  (panel live "en service")
 
 # Nom du rôle Discord autorisé à administrer le bot (modifier si besoin)
 ADMIN_ROLE_NAME = "Admin Paye"
@@ -92,12 +92,15 @@ def set_sessions(data: dict):
     sauver_json(SESSIONS_FILE, data)
 
 
-def get_panel() -> dict:
-    return charger_json(PANEL_FILE, {})
-
-
-def set_panel(data: dict):
-    sauver_json(PANEL_FILE, data)
+def normaliser(texte: str) -> str:
+    """
+    Normalise un texte pour la comparaison : minuscules, sans accents, sans espaces superflus.
+    Permet de faire correspondre 'médecin', 'Médecin', 'MEDECIN' ou 'medecin' entre eux.
+    """
+    texte = texte.strip().lower()
+    texte = unicodedata.normalize("NFKD", texte)
+    texte = "".join(c for c in texte if not unicodedata.combining(c))
+    return texte
 
 
 def est_admin(interaction: discord.Interaction) -> bool:
@@ -111,13 +114,18 @@ def est_admin(interaction: discord.Interaction) -> bool:
 def detecter_grade(membre: discord.Member) -> list[str]:
     """
     Détecte le(s) grade(s) correspondant aux rôles Discord du membre.
-    Un grade est reconnu si un rôle du membre porte exactement le même nom
-    qu'un grade créé avec /grade_set. Retourne la liste des grades trouvés,
-    triée du rôle le plus haut (le plus senior) au plus bas dans la hiérarchie.
+    Un grade est reconnu si un rôle du membre porte le même nom (insensible à la casse)
+    qu'un grade créé avec /grade_set. Retourne la liste des grades trouvés (noms exacts
+    tels qu'enregistrés dans /grade_set), triée du rôle le plus haut au plus bas.
     """
-    grades = get_grades()
+    grades = get_grades()  # {"NomDuGrade": taux}
+    grades_par_nom_normalise = {normaliser(nom): nom for nom in grades}
     roles_du_membre = sorted(membre.roles, key=lambda r: r.position, reverse=True)
-    grades_trouves = [r.name for r in roles_du_membre if r.name in grades]
+    grades_trouves = []
+    for r in roles_du_membre:
+        nom_grade_reel = grades_par_nom_normalise.get(normaliser(r.name))
+        if nom_grade_reel and nom_grade_reel not in grades_trouves:
+            grades_trouves.append(nom_grade_reel)
     return grades_trouves
 
 
@@ -139,74 +147,7 @@ async def on_ready():
         print(f"{len(synced)} commande(s) slash synchronisée(s).")
     except Exception as e:
         print(f"Erreur de synchronisation : {e}")
-    await rafraichir_panel(bot)  # Resynchronise le panel live après un redémarrage
     print(f"Connecté en tant que {bot.user} (ID: {bot.user.id})")
-
-
-# ---------------------------------------------------------------------------
-# PANEL LIVE - LISTE DES PERSONNES ACTUELLEMENT EN SERVICE
-# ---------------------------------------------------------------------------
-
-def formater_duree(debut: datetime) -> str:
-    """Retourne une durée écoulée lisible (ex: '1h 24min') depuis un datetime de début."""
-    delta = datetime.now(timezone.utc) - debut
-    total_min = int(delta.total_seconds() // 60)
-    heures, minutes = divmod(total_min, 60)
-    if heures > 0:
-        return f"{heures}h {minutes:02d}min"
-    return f"{minutes}min"
-
-
-def construire_embed_panel() -> discord.Embed:
-    """Construit l'embed listant toutes les personnes actuellement en service."""
-    sessions = get_sessions()
-
-    embed = discord.Embed(
-        title="🟢 En service actuellement",
-        color=discord.Color.green() if sessions else discord.Color.greyple(),
-    )
-
-    if not sessions:
-        embed.description = "Personne n'est actuellement en service."
-    else:
-        # Trie par heure de début (les plus anciens en premier)
-        elements = sorted(sessions.items(), key=lambda kv: kv[1]["debut"])
-        lignes = []
-        for user_id, session in elements:
-            debut = datetime.fromisoformat(session["debut"])
-            grade = session["grade"]
-            duree = formater_duree(debut)
-            lignes.append(f"🟢 <@{user_id}> — **{grade}** — depuis {duree}")
-        embed.description = "\n".join(lignes)
-        embed.set_footer(text=f"{len(sessions)} personne(s) en service")
-
-    embed.timestamp = datetime.now(timezone.utc)
-    return embed
-
-
-async def rafraichir_panel(bot: commands.Bot):
-    """Met à jour le message du panel live (s'il a déjà été posté via /panel_service)."""
-    panel = get_panel()
-    channel_id = panel.get("channel_id")
-    message_id = panel.get("message_id")
-
-    if not channel_id or not message_id:
-        return  # Aucun panel n'a encore été posté, rien à faire
-
-    channel = bot.get_channel(channel_id)
-    if channel is None:
-        try:
-            channel = await bot.fetch_channel(channel_id)
-        except discord.HTTPException:
-            return
-
-    try:
-        message = await channel.fetch_message(message_id)
-        await message.edit(embed=construire_embed_panel())
-    except discord.NotFound:
-        pass  # Le message a été supprimé manuellement, on ignore
-    except discord.HTTPException:
-        pass
 
 
 # ---------------------------------------------------------------------------
@@ -253,7 +194,6 @@ class GradeSelect(discord.ui.Select):
             ),
             view=None,
         )
-        await rafraichir_panel(interaction.client)
 
 
 class GradeSelectView(discord.ui.View):
@@ -341,7 +281,6 @@ class PointeuseView(discord.ui.View):
             f"Clique sur **Fin de service** quand tu auras terminé.",
             ephemeral=True,
         )
-        await rafraichir_panel(interaction.client)
 
     @discord.ui.button(
         label="Fin de service",
@@ -394,21 +333,6 @@ class PointeuseView(discord.ui.View):
             f"Durée : **{duree_heures:.2f} h** — Montant : **{montant:.2f} €**",
             ephemeral=True,
         )
-        await rafraichir_panel(interaction.client)
-
-
-@bot.tree.command(name="panel_service", description="Publier le panel live des personnes actuellement en service")
-async def panel_service(interaction: discord.Interaction):
-    if not est_admin(interaction):
-        await interaction.response.send_message(
-            "Tu n'as pas la permission d'utiliser cette commande.", ephemeral=True
-        )
-        return
-
-    await interaction.response.send_message(embed=construire_embed_panel())
-    message = await interaction.original_response()
-
-    set_panel({"channel_id": interaction.channel_id, "message_id": message.id})
 
 
 @bot.tree.command(name="pointeuse", description="Publier le panneau de prise/fin de service (boutons)")
@@ -686,11 +610,12 @@ def obtenir_rang_actuel(membre: discord.Member):
     """
     Retourne (index, nom_du_grade) du rang actuel du membre dans la HIERARCHIE,
     ou (None, None) si le membre n'a aucun rôle de la hiérarchie.
+    La comparaison ignore la casse (majuscules/minuscules).
     Si le membre a plusieurs rôles de la hiérarchie (cas anormal), le plus haut est retourné.
     """
-    noms_roles_membre = {r.name for r in membre.roles}
+    noms_roles_membre = {normaliser(r.name) for r in membre.roles}
     rangs_trouves = [
-        (i, grade) for i, grade in enumerate(HIERARCHIE) if grade in noms_roles_membre
+        (i, grade) for i, grade in enumerate(HIERARCHIE) if normaliser(grade) in noms_roles_membre
     ]
     if not rangs_trouves:
         return None, None
@@ -701,19 +626,21 @@ def obtenir_rang_actuel(membre: discord.Member):
 async def changer_role_hierarchie(
     interaction: discord.Interaction, membre: discord.Member, ancien_grade: str | None, nouveau_grade: str
 ):
-    """Retire l'ancien rôle de hiérarchie (s'il existe) et attribue le nouveau. Retourne (succès, message_erreur)."""
+    """Retire l'ancien rôle de hiérarchie (s'il existe) et attribue le nouveau. Retourne (succès, message_erreur).
+    La recherche du rôle Discord ignore la casse (majuscules/minuscules)."""
     guild = interaction.guild
-    nouveau_role = discord.utils.get(guild.roles, name=nouveau_grade)
+    nouveau_role = discord.utils.find(lambda r: normaliser(r.name) == normaliser(nouveau_grade), guild.roles)
 
     if nouveau_role is None:
         return False, (
             f"❌ Le rôle Discord **{nouveau_grade}** n'existe pas sur ce serveur. "
-            f"Crée-le d'abord (Paramètres du serveur → Rôles) avec ce nom exact."
+            f"Crée-le d'abord (Paramètres du serveur → Rôles) — le nom peut être en minuscules, "
+            f"seule l'orthographe compte, pas la casse."
         )
 
     try:
         if ancien_grade is not None:
-            ancien_role = discord.utils.get(guild.roles, name=ancien_grade)
+            ancien_role = discord.utils.find(lambda r: normaliser(r.name) == normaliser(ancien_grade), guild.roles)
             if ancien_role is not None and ancien_role in membre.roles:
                 await membre.remove_roles(ancien_role, reason="Changement de grade via /rankup ou /derank")
         await membre.add_roles(nouveau_role, reason="Changement de grade via /rankup ou /derank")
