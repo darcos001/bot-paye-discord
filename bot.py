@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 
 import discord
 from discord import app_commands
-from discord.ext import commands
+from discord.ext import commands, tasks
 
 # ---------------------------------------------------------------------------
 # CONFIGURATION
@@ -29,6 +29,7 @@ TOKEN = os.getenv("DISCORD_TOKEN")  # Le token est lu depuis une variable d'envi
 GRADES_FILE = "grades.json"       # {"grade_nom": taux_horaire}
 SERVICES_FILE = "services.json"   # {"user_id": [ {grade, heures, date, paye} ]}
 SESSIONS_FILE = "sessions.json"   # {"user_id": {"grade": ..., "debut": iso}}  (services en cours)
+PANEL_FILE = "panel.json"         # {"channel_id": ..., "message_id": ...} (panneau permanent des membres en service)
 
 # Nom du rôle Discord autorisé à administrer le bot (modifier si besoin)
 ADMIN_ROLE_NAME = "Admin Paye"
@@ -92,6 +93,19 @@ def set_sessions(data: dict):
     sauver_json(SESSIONS_FILE, data)
 
 
+def get_panel_config():
+    return charger_json(PANEL_FILE, None)
+
+
+def set_panel_config(channel_id: int, message_id: int):
+    sauver_json(PANEL_FILE, {"channel_id": channel_id, "message_id": message_id})
+
+
+def effacer_panel_config():
+    if os.path.exists(PANEL_FILE):
+        os.remove(PANEL_FILE)
+
+
 def normaliser(texte: str) -> str:
     """
     Normalise un texte pour la comparaison : minuscules, sans accents, sans espaces superflus.
@@ -149,6 +163,16 @@ async def on_ready():
         print(f"Erreur de synchronisation : {e}")
     print(f"Connecté en tant que {bot.user} (ID: {bot.user.id})")
 
+    if not rafraichir_panel_periodiquement.is_running():
+        rafraichir_panel_periodiquement.start()
+
+
+@tasks.loop(minutes=2)
+async def rafraichir_panel_periodiquement():
+    """Met à jour le panneau permanent toutes les 2 minutes (pour rafraîchir les durées affichées)."""
+    for guild in bot.guilds:
+        await mettre_a_jour_panel(guild)
+
 
 # ---------------------------------------------------------------------------
 # POINTEUSE - PRISE / FIN DE SERVICE PAR BOUTONS
@@ -194,6 +218,7 @@ class GradeSelect(discord.ui.Select):
             ),
             view=None,
         )
+        await mettre_a_jour_panel(interaction.guild)
 
 
 class GradeSelectView(discord.ui.View):
@@ -202,6 +227,57 @@ class GradeSelectView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=120)
         self.add_item(GradeSelect())
+
+
+def construire_embed_panel(guild: discord.Guild) -> discord.Embed:
+    """Construit l'embed listant les membres actuellement en service."""
+    sessions = get_sessions()
+    maintenant = datetime.now(timezone.utc)
+
+    if not sessions:
+        description = "Personne n'est actuellement en service."
+    else:
+        lignes = []
+        for user_id, session in sessions.items():
+            debut = datetime.fromisoformat(session["debut"])
+            duree = (maintenant - debut).total_seconds() / 3600
+            membre = guild.get_member(int(user_id))
+            nom = membre.mention if membre else f"Utilisateur inconnu ({user_id})"
+            lignes.append(f"🟢 {nom} — **{session['grade']}** — depuis **{duree:.2f} h**")
+        description = "\n".join(lignes)
+
+    embed = discord.Embed(
+        title="🕒 Membres actuellement en service",
+        description=description,
+        color=discord.Color.green(),
+    )
+    embed.set_footer(text=f"Mis à jour automatiquement — {maintenant.strftime('%d/%m/%Y %H:%M UTC')}")
+    return embed
+
+
+async def mettre_a_jour_panel(guild: discord.Guild):
+    """
+    Met à jour le panneau permanent (s'il a été créé avec /panel_service) pour refléter
+    les membres actuellement en service. Ne fait rien si aucun panneau n'a été configuré.
+    """
+    config = get_panel_config()
+    if config is None:
+        return
+
+    channel = guild.get_channel(config["channel_id"])
+    if channel is None:
+        return
+
+    try:
+        message = await channel.fetch_message(config["message_id"])
+    except (discord.NotFound, discord.Forbidden):
+        effacer_panel_config()  # Le message a été supprimé ou n'est plus accessible -> on oublie ce panneau
+        return
+
+    try:
+        await message.edit(embed=construire_embed_panel(guild))
+    except discord.HTTPException:
+        pass  # Échec silencieux (ex: rate limit) -> la prochaine mise à jour réessaiera
 
 
 class PointeuseView(discord.ui.View):
@@ -281,6 +357,7 @@ class PointeuseView(discord.ui.View):
             f"Clique sur **Fin de service** quand tu auras terminé.",
             ephemeral=True,
         )
+        await mettre_a_jour_panel(interaction.guild)
 
     @discord.ui.button(
         label="Fin de service",
@@ -291,6 +368,8 @@ class PointeuseView(discord.ui.View):
     async def fin_service(self, interaction: discord.Interaction, button: discord.ui.Button):
         succes, message = terminer_session(str(interaction.user.id))
         await interaction.response.send_message(message, ephemeral=True)
+        if succes:
+            await mettre_a_jour_panel(interaction.guild)
 
 
 def terminer_session(user_id: str):
@@ -376,6 +455,7 @@ async def service_forcer_fin(interaction: discord.Interaction, membre: discord.M
     await interaction.response.send_message(
         f"⚠️ Service de {membre.mention} clôturé de force par {interaction.user.mention}.\n{message}"
     )
+    await mettre_a_jour_panel(interaction.guild)
 
 
 @bot.tree.command(name="service_en_cours", description="[Admin] Voir la liste des membres actuellement en service")
@@ -407,6 +487,24 @@ async def service_en_cours(interaction: discord.Interaction):
         color=discord.Color.green(),
     )
     await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+@bot.tree.command(
+    name="panel_service",
+    description="[Admin] Publier le panneau permanent des membres en service (mis à jour automatiquement)",
+)
+async def panel_service(interaction: discord.Interaction):
+    if not est_admin(interaction):
+        await interaction.response.send_message(
+            "Tu n'as pas la permission d'utiliser cette commande.", ephemeral=True
+        )
+        return
+
+    embed = construire_embed_panel(interaction.guild)
+    await interaction.response.send_message(embed=embed)
+    message_envoye = await interaction.original_response()
+
+    set_panel_config(channel_id=message_envoye.channel.id, message_id=message_envoye.id)
 
 
 # ---------------------------------------------------------------------------
