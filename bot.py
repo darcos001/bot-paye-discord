@@ -38,7 +38,7 @@ ADMIN_ROLE_NAME = "Admin Paye"
 HIERARCHIE = [
     "stagiaire",
     "secouriste",
-    "ambulancier",
+    "smbulancier",
     "aide-soignant",
     "infirmier",
     "infirmier en chef",
@@ -289,50 +289,53 @@ class PointeuseView(discord.ui.View):
         custom_id="pointeuse_fin",
     )
     async def fin_service(self, interaction: discord.Interaction, button: discord.ui.Button):
-        sessions = get_sessions()
-        user_id = str(interaction.user.id)
+        succes, message = terminer_session(str(interaction.user.id))
+        await interaction.response.send_message(message, ephemeral=True)
 
-        if user_id not in sessions:
-            await interaction.response.send_message(
-                "Tu n'as pas de prise de service en cours.", ephemeral=True
-            )
-            return
 
-        session = sessions.pop(user_id)
-        set_sessions(sessions)
+def terminer_session(user_id: str):
+    """
+    Clôture la session de service en cours pour user_id, calcule les heures et
+    les enregistre dans services.json. Retourne (succès: bool, message: str).
+    Fonction partagée entre le bouton 'Fin de service' et la commande admin /service_forcer_fin.
+    """
+    sessions = get_sessions()
 
-        debut = datetime.fromisoformat(session["debut"])
-        fin = datetime.now(timezone.utc)
-        duree_heures = (fin - debut).total_seconds() / 3600
-        grade = session["grade"]
+    if user_id not in sessions:
+        return False, "Cette personne n'a pas de prise de service en cours."
 
-        if duree_heures < (1 / 60):  # moins d'une minute : on ignore, probable erreur de clic
-            await interaction.response.send_message(
-                "Service trop court (< 1 minute), il n'a pas été enregistré.", ephemeral=True
-            )
-            return
+    session = sessions.pop(user_id)
+    set_sessions(sessions)
 
-        grades = get_grades()
-        taux = grades.get(grade, 0)
-        montant = duree_heures * taux
+    debut = datetime.fromisoformat(session["debut"])
+    fin = datetime.now(timezone.utc)
+    duree_heures = (fin - debut).total_seconds() / 3600
+    grade = session["grade"]
 
-        services = get_services()
-        services.setdefault(user_id, [])
-        services[user_id].append(
-            {
-                "grade": grade,
-                "heures": round(duree_heures, 2),
-                "date": fin.isoformat(),
-                "paye": False,
-            }
-        )
-        set_services(services)
+    if duree_heures < (1 / 60):  # moins d'une minute : on ignore, probable erreur de clic
+        return False, "Service trop court (< 1 minute), il n'a pas été enregistré."
 
-        await interaction.response.send_message(
-            f"🔴 Fin de service enregistrée en tant que **{grade}**.\n"
-            f"Durée : **{duree_heures:.2f} h** — Montant : **{montant:.2f} €**",
-            ephemeral=True,
-        )
+    grades = get_grades()
+    taux = grades.get(grade, 0)
+    montant = duree_heures * taux
+
+    services = get_services()
+    services.setdefault(user_id, [])
+    services[user_id].append(
+        {
+            "grade": grade,
+            "heures": round(duree_heures, 2),
+            "date": fin.isoformat(),
+            "paye": False,
+        }
+    )
+    set_services(services)
+
+    message = (
+        f"🔴 Fin de service enregistrée en tant que **{grade}**.\n"
+        f"Durée : **{duree_heures:.2f} h** — Montant : **{montant:.2f} €**"
+    )
+    return True, message
 
 
 @bot.tree.command(name="pointeuse", description="Publier le panneau de prise/fin de service (boutons)")
@@ -353,6 +356,57 @@ async def pointeuse(interaction: discord.Interaction):
         color=discord.Color.blurple(),
     )
     await interaction.response.send_message(embed=embed, view=PointeuseView())
+
+
+@bot.tree.command(name="service_forcer_fin", description="[Admin] Clôturer de force la prise de service d'un membre")
+@app_commands.describe(membre="Le membre dont il faut terminer le service en cours")
+async def service_forcer_fin(interaction: discord.Interaction, membre: discord.Member):
+    if not est_admin(interaction):
+        await interaction.response.send_message(
+            "Tu n'as pas la permission d'utiliser cette commande.", ephemeral=True
+        )
+        return
+
+    succes, message = terminer_session(str(membre.id))
+
+    if not succes:
+        await interaction.response.send_message(f"{membre.mention} : {message}", ephemeral=True)
+        return
+
+    await interaction.response.send_message(
+        f"⚠️ Service de {membre.mention} clôturé de force par {interaction.user.mention}.\n{message}"
+    )
+
+
+@bot.tree.command(name="service_en_cours", description="[Admin] Voir la liste des membres actuellement en service")
+async def service_en_cours(interaction: discord.Interaction):
+    if not est_admin(interaction):
+        await interaction.response.send_message(
+            "Tu n'as pas la permission d'utiliser cette commande.", ephemeral=True
+        )
+        return
+
+    sessions = get_sessions()
+
+    if not sessions:
+        await interaction.response.send_message("Personne n'est actuellement en service.", ephemeral=True)
+        return
+
+    lignes = []
+    maintenant = datetime.now(timezone.utc)
+    for user_id, session in sessions.items():
+        debut = datetime.fromisoformat(session["debut"])
+        duree = (maintenant - debut).total_seconds() / 3600
+        membre = interaction.guild.get_member(int(user_id))
+        nom = membre.mention if membre else f"Utilisateur inconnu ({user_id})"
+        lignes.append(f"{nom} — **{session['grade']}** — en service depuis **{duree:.2f} h**")
+
+    embed = discord.Embed(
+        title="🟢 Membres actuellement en service",
+        description="\n".join(lignes),
+        color=discord.Color.green(),
+    )
+    await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
 # ---------------------------------------------------------------------------
