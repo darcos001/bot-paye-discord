@@ -51,6 +51,11 @@ HIERARCHIE = [
     "Directeur",
 ]
 
+# Rôle supplémentaire attribué automatiquement en plus du premier grade
+# lorsqu'un membre n'a encore aucun rôle de la hiérarchie (via /rankup).
+# ⚠️ Doit correspondre EXACTEMENT au nom d'un rôle Discord existant sur le serveur.
+ROLE_EMS = "EMS"
+
 # ---------------------------------------------------------------------------
 # UTILITAIRES DE STOCKAGE
 # ---------------------------------------------------------------------------
@@ -820,14 +825,34 @@ async def rankup(interaction: discord.Interaction, membre: discord.Member):
     index_actuel, grade_actuel = obtenir_rang_actuel(membre)
 
     if index_actuel is None:
-        # Le membre n'a aucun grade de la hiérarchie -> on lui attribue le premier (Stagiaire)
+        # Le membre n'a aucun grade de la hiérarchie -> on lui attribue le premier (Secouriste)
         nouveau_grade = HIERARCHIE[0]
         succes, erreur = await changer_role_hierarchie(interaction, membre, None, nouveau_grade)
         if not succes:
             await interaction.response.send_message(erreur, ephemeral=True)
             return
+
+        # On lui attribue en plus le rôle EMS s'il ne l'a pas déjà
+        role_ems = discord.utils.find(lambda r: normaliser(r.name) == normaliser(ROLE_EMS), interaction.guild.roles)
+        if role_ems is None:
+            await interaction.response.send_message(
+                f"⬆️ {membre.mention} commence maintenant au grade **{nouveau_grade}**.\n"
+                f"⚠️ Le rôle **{ROLE_EMS}** n'existe pas sur ce serveur, il n'a donc pas pu être ajouté."
+            )
+            return
+
+        if role_ems not in membre.roles:
+            try:
+                await membre.add_roles(role_ems, reason="Attribution automatique du rôle EMS via /rankup")
+            except discord.Forbidden:
+                await interaction.response.send_message(
+                    f"⬆️ {membre.mention} commence maintenant au grade **{nouveau_grade}**.\n"
+                    f"❌ Je n'ai pas la permission d'ajouter le rôle **{ROLE_EMS}**."
+                )
+                return
+
         await interaction.response.send_message(
-            f"⬆️ {membre.mention} commence maintenant au grade **{nouveau_grade}**."
+            f"⬆️ {membre.mention} commence maintenant au grade **{nouveau_grade}** et reçoit le rôle **{ROLE_EMS}**."
         )
         return
 
