@@ -37,16 +37,16 @@ ADMIN_ROLE_NAME = "Admin Paye"
 # Hiérarchie des grades, du plus bas au plus haut (utilisée par /rankup et /derank).
 # ⚠️ Chaque nom doit correspondre EXACTEMENT au nom d'un rôle Discord existant sur le serveur.
 HIERARCHIE = [
-    "Secouriste",
-    "Secouriste - Chef d'équipe",
-    "Secouriste - Responsable",
-    "Infirmier",
-    "Infirmier chef",
-    "Médecin",
-    "Médecin chef",
-    "Chef de service - Radiologie",
-    "Chef de service - Médecine Polyvalente",
-    "Chef de service - Urgence",
+    "🚨Secouriste",
+    "🚨Secouriste - Chef d'équipe",
+    "🚨Secouriste - Responsable",
+    "😷Infirmier",
+    "😷Infirmier chef",
+    "🧑‍⚕️Médecin",
+    "🧑‍⚕️Médecin chef",
+    "❤️‍🩹Chef de service - Radiologie",
+    "🩻Chef de service - Médecine Polyvalente",
+    "🚨Chef de service - Urgence",
     "Directeur ADJ",
     "Directeur",
 ]
