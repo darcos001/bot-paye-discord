@@ -54,7 +54,7 @@ HIERARCHIE = [
 # Rôle supplémentaire attribué automatiquement en plus du premier grade
 # lorsqu'un membre n'a encore aucun rôle de la hiérarchie (via /rankup).
 # ⚠️ Doit correspondre EXACTEMENT au nom d'un rôle Discord existant sur le serveur.
-ROLE_EMS = "EMS"
+ROLE_EMS = "🚨EMS"
 
 # ---------------------------------------------------------------------------
 # UTILITAIRES DE STOCKAGE
