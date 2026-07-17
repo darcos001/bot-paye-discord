@@ -26,10 +26,17 @@ from discord.ext import commands, tasks
 # ---------------------------------------------------------------------------
 
 TOKEN = os.getenv("DISCORD_TOKEN")  # Le token est lu depuis une variable d'environnement
-GRADES_FILE = "grades.json"       # {"grade_nom": taux_horaire}
-SERVICES_FILE = "services.json"   # {"user_id": [ {grade, heures, date, paye} ]}
-SESSIONS_FILE = "sessions.json"   # {"user_id": {"grade": ..., "debut": iso}}  (services en cours)
-PANEL_FILE = "panel.json"         # {"channel_id": ..., "message_id": ...} (panneau permanent des membres en service)
+
+# Dossier où sont stockées les données persistantes. Sur Railway, monte un volume sur ce
+# chemin (variable d'environnement DATA_DIR) pour que les données survivent aux redéploiements.
+# En local (sans volume), les fichiers sont simplement créés dans le dossier courant.
+DATA_DIR = os.getenv("DATA_DIR", ".")
+os.makedirs(DATA_DIR, exist_ok=True)
+
+GRADES_FILE = os.path.join(DATA_DIR, "grades.json")       # {"grade_nom": taux_horaire}
+SERVICES_FILE = os.path.join(DATA_DIR, "services.json")   # {"user_id": [ {grade, heures, date, paye} ]}
+SESSIONS_FILE = os.path.join(DATA_DIR, "sessions.json")   # {"user_id": {"grade": ..., "debut": iso}}  (services en cours)
+PANEL_FILE = os.path.join(DATA_DIR, "panel.json")         # {"channel_id": ..., "message_id": ...} (panneau permanent des membres en service)     # {"channel_id": ..., "message_id": ...} (panneau permanent des membres en service)
 
 # Nom du rôle Discord autorisé à administrer le bot (modifier si besoin)
 ADMIN_ROLE_NAME = "Admin Paye"
