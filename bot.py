@@ -14,6 +14,7 @@ Toutes les données sont sauvegardées dans des fichiers JSON locaux
 
 import json
 import os
+import re
 import unicodedata
 from datetime import datetime, timezone
 
@@ -48,16 +49,18 @@ ADMIN_ROLE_NAME = "Admin Paye"
 # automatiquement par /role_renommer.
 # ⚠️ Chaque nom doit correspondre EXACTEMENT au nom d'un rôle Discord existant sur le serveur.
 HIERARCHIE_PAR_DEFAUT = [
-    "👨‍⚕️• Stagiaire",
-    "🚑• Ambulancier",
-    "🩹• Aide-Soignant",
-    "💉• Infirmier",
-    "🩺• Infirmier en Chef",
-    "⚕️• Médecin",
-    "🏥• Médecin en Chef",
-    "📋• Chef de Service",
-    "🏛️• Directeur Adjoint",
-    "👑 • Directeur",
+    "🚨Secouriste",
+    "🚨Secouriste - Chef d'équipe",
+    "🚨Secouriste - Responsable",
+    "😷Infirmier",
+    "😷Infirmier chef",
+    "🧑‍⚕️Médecin",
+    "🧑‍⚕️Médecin chef",
+    "❤️‍🩹Chef de service - Radiologie",
+    "🩻Chef de service - Médecine Polyvalente",
+    "🚨Chef de service - Urgence",
+    "Directeur ADJ",
+    "Directeur",
 ]
 
 # Rôle supplémentaire attribué automatiquement en plus du premier grade
@@ -539,9 +542,9 @@ async def panel_service(interaction: discord.Interaction):
 # GESTION DES GRADES / TAUX HORAIRES
 # ---------------------------------------------------------------------------
 
-@bot.tree.command(name="grade_set", description="Définir (ou modifier) le taux horaire d'un grade")
-@app_commands.describe(grade="Nom du grade (ex: Agent, Sergent, Capitaine)", taux_horaire="Taux horaire en euros")
-async def grade_set(interaction: discord.Interaction, grade: str, taux_horaire: float):
+@bot.tree.command(name="grade_set", description="Définir (ou modifier) le taux horaire d'un grade (associé à un rôle Discord)")
+@app_commands.describe(role="Le rôle Discord correspondant à ce grade", taux_horaire="Taux horaire en euros")
+async def grade_set(interaction: discord.Interaction, role: discord.Role, taux_horaire: float):
     if not est_admin(interaction):
         await interaction.response.send_message(
             "Tu n'as pas la permission d'utiliser cette commande.", ephemeral=True
@@ -553,31 +556,42 @@ async def grade_set(interaction: discord.Interaction, grade: str, taux_horaire: 
         return
 
     grades = get_grades()
-    grades[grade] = taux_horaire
+    grades[role.name] = taux_horaire
     set_grades(grades)
 
     await interaction.response.send_message(
-        f"✅ Le grade **{grade}** a maintenant un taux horaire de **{taux_horaire:.2f} €/h**."
+        f"✅ Le grade **{role.name}** ({role.mention}) a maintenant un taux horaire de **{taux_horaire:.2f} €/h**."
     )
 
 
 @bot.tree.command(name="grade_supprimer", description="Supprimer un grade existant")
-@app_commands.describe(grade="Nom du grade à supprimer")
-async def grade_supprimer(interaction: discord.Interaction, grade: str):
+@app_commands.describe(
+    role="Le rôle Discord dont le grade doit être supprimé (recommandé)",
+    grade="Ou le nom exact du grade à supprimer, si le rôle Discord n'existe plus",
+)
+async def grade_supprimer(interaction: discord.Interaction, role: discord.Role = None, grade: str = None):
     if not est_admin(interaction):
         await interaction.response.send_message(
             "Tu n'as pas la permission d'utiliser cette commande.", ephemeral=True
         )
         return
 
-    grades = get_grades()
-    if grade not in grades:
-        await interaction.response.send_message(f"Le grade **{grade}** n'existe pas.", ephemeral=True)
+    if role is None and not grade:
+        await interaction.response.send_message(
+            "Précise soit `role` (le rôle Discord), soit `grade` (le nom exact du grade).", ephemeral=True
+        )
         return
 
-    del grades[grade]
+    nom_cible = role.name if role is not None else grade
+
+    grades = get_grades()
+    if nom_cible not in grades:
+        await interaction.response.send_message(f"Le grade **{nom_cible}** n'existe pas.", ephemeral=True)
+        return
+
+    del grades[nom_cible]
     set_grades(grades)
-    await interaction.response.send_message(f"🗑️ Le grade **{grade}** a été supprimé.")
+    await interaction.response.send_message(f"🗑️ Le grade **{nom_cible}** a été supprimé.")
 
 
 @bot.tree.command(name="grade_liste", description="Afficher la liste des grades et leur taux horaire")
@@ -594,6 +608,136 @@ async def grade_liste(interaction: discord.Interaction):
         color=discord.Color.blurple(),
     )
     await interaction.response.send_message(embed=embed)
+
+
+# Détecte les grades enregistrés par erreur comme mention Discord (ex: "<@&123456789012345>")
+# au lieu du nom du rôle en texte — cas classique quand on sélectionne le rôle proposé par
+# l'autocomplétion "@" de Discord dans un champ texte au lieu de taper le nom.
+_MENTION_ROLE_RE = re.compile(r"^<@&(\d+)>$")
+
+
+@bot.tree.command(
+    name="grade_reparer",
+    description="[Admin] Corrige les grades enregistrés comme mention Discord (ex: @Stagiaire) au lieu du nom du rôle",
+)
+async def grade_reparer(interaction: discord.Interaction):
+    if not est_admin(interaction):
+        await interaction.response.send_message(
+            "Tu n'as pas la permission d'utiliser cette commande.", ephemeral=True
+        )
+        return
+
+    grades = get_grades()
+    services = get_services()
+    corriges = []
+    introuvables = []
+
+    for cle in list(grades.keys()):
+        correspondance = _MENTION_ROLE_RE.match(cle.strip())
+        if not correspondance:
+            continue  # déjà un nom normal, rien à faire
+
+        role_id = int(correspondance.group(1))
+        role = interaction.guild.get_role(role_id)
+        taux = grades.pop(cle)
+
+        if role is None:
+            # Le rôle n'existe plus (supprimé) -> on ne peut pas deviner son nom automatiquement
+            grades[cle] = taux
+            introuvables.append((cle, taux))
+            continue
+
+        grades[role.name] = taux
+        corriges.append((cle, role.name, taux))
+
+        # Met aussi à jour l'historique de paye déjà enregistré sous l'ancienne clé cassée
+        for entrees in services.values():
+            for e in entrees:
+                if e.get("grade") == cle:
+                    e["grade"] = role.name
+
+    set_grades(grades)
+    set_services(services)
+
+    lignes = []
+    if corriges:
+        lignes.append("✅ **Grades corrigés :**")
+        for ancien, nouveau, taux in corriges:
+            lignes.append(f"• `{ancien}` → **{nouveau}** ({taux:.2f} €/h)")
+    if introuvables:
+        lignes.append("\n⚠️ **Rôle introuvable pour ces entrées (peut-être supprimé de Discord) :**")
+        for cle, taux in introuvables:
+            lignes.append(
+                f"• `{cle}` ({taux:.2f} €/h) — supprime-le avec `/grade_supprimer grade:{cle}` "
+                "puis recrée-le avec `/grade_set`."
+            )
+    if not corriges and not introuvables:
+        lignes.append("✅ Aucun grade cassé trouvé, tout est déjà correct.")
+
+    await interaction.response.send_message("\n".join(lignes)[:2000])
+
+
+# ---------------------------------------------------------------------------
+# DIAGNOSTIC : POURQUOI UN RÔLE N'EST PAS DÉTECTÉ AUTOMATIQUEMENT
+# ---------------------------------------------------------------------------
+
+@bot.tree.command(
+    name="diagnostic_roles",
+    description="[Admin] Compare précisément un rôle Discord et un grade enregistré, caractère par caractère",
+)
+@app_commands.describe(
+    membre="Membre à diagnostiquer (toi-même par défaut, optionnel)",
+)
+async def diagnostic_roles(interaction: discord.Interaction, membre: discord.Member = None):
+    if not est_admin(interaction):
+        await interaction.response.send_message(
+            "Tu n'as pas la permission d'utiliser cette commande.", ephemeral=True
+        )
+        return
+
+    cible = membre or interaction.user
+    grades = get_grades()
+    grades_par_nom_normalise = {normaliser(nom): nom for nom in grades}
+
+    def codes_unicode(texte: str) -> str:
+        # Affiche chaque caractère avec son code Unicode, pour repérer les caractères invisibles
+        # (apostrophe courbe, espace insécable, variation d'emoji, etc.)
+        return " ".join(f"U+{ord(c):04X}" for c in texte)
+
+    lignes_roles = []
+    for r in sorted(cible.roles, key=lambda r: r.position, reverse=True):
+        if r.name == "@everyone":
+            continue
+        nom_correspondant = grades_par_nom_normalise.get(normaliser(r.name))
+        if nom_correspondant:
+            lignes_roles.append(f"✅ **{r.name}** → détecté comme grade **{nom_correspondant}**")
+        else:
+            lignes_roles.append(
+                f"❌ **{r.name}** → aucun grade ne correspond\n`{codes_unicode(r.name)}`"
+            )
+
+    if not lignes_roles:
+        lignes_roles = ["Ce membre n'a aucun rôle (hors @everyone)."]
+
+    embed = discord.Embed(
+        title=f"🔍 Diagnostic des rôles — {cible.display_name}",
+        description="\n\n".join(lignes_roles)[:4000],
+        color=discord.Color.orange(),
+    )
+
+    lignes_grades = [f"**{nom}**\n`{codes_unicode(nom)}`" for nom in grades]
+    embed.add_field(
+        name="Grades enregistrés (avec codes Unicode)",
+        value=("\n\n".join(lignes_grades) or "Aucun grade enregistré.")[:1024],
+        inline=False,
+    )
+    embed.set_footer(
+        text="Si un rôle et un grade se ressemblent mais ont des codes U+... différents "
+        "au même endroit, c'est la cause du problème (recréez le grade avec /grade_set "
+        "en copiant-collant le nom du rôle depuis Discord)."
+    )
+
+    await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
 # ---------------------------------------------------------------------------
