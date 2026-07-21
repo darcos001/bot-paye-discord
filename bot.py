@@ -48,18 +48,16 @@ ADMIN_ROLE_NAME = "Admin Paye"
 # automatiquement par /role_renommer.
 # ⚠️ Chaque nom doit correspondre EXACTEMENT au nom d'un rôle Discord existant sur le serveur.
 HIERARCHIE_PAR_DEFAUT = [
-    "🚨Secouriste",
-    "🚨Secouriste - Chef d'équipe",
-    "🚨Secouriste - Responsable",
-    "😷Infirmier",
-    "😷Infirmier chef",
-    "🧑‍⚕️Médecin",
-    "🧑‍⚕️Médecin chef",
-    "❤️‍🩹Chef de service - Radiologie",
-    "🩻Chef de service - Médecine Polyvalente",
-    "🚨Chef de service - Urgence",
-    "Directeur ADJ",
-    "Directeur",
+    "👨‍⚕️• Stagiaire",
+    "🚑• Ambulancier",
+    "🩹• Aide-Soignant",
+    "💉• Infirmier",
+    "🩺• Infirmier en Chef",
+    "⚕️• Médecin",
+    "🏥• Médecin en Chef",
+    "📋• Chef de Service",
+    "🏛️• Directeur Adjoint",
+    "👑 • Directeur",
 ]
 
 # Rôle supplémentaire attribué automatiquement en plus du premier grade
