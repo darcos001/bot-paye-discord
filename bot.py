@@ -1,88 +1,113 @@
-# ---------------------------------------------------------------------------
-# RENOMMAGE SÉCURISÉ D'UN RÔLE
-# ---------------------------------------------------------------------------
+# Bot Discord - Calcul de Paye par Grade
 
-@bot.tree.command(
-    name="role_renommer",
-    description="[Admin] Renommer un rôle Discord en mettant à jour le bot (grade, historique) automatiquement",
-)
-@app_commands.describe(role="Le rôle Discord à renommer", nouveau_nom="Le nouveau nom du rôle")
-async def role_renommer(interaction: discord.Interaction, role: discord.Role, nouveau_nom: str):
-    if not est_admin(interaction):
-        await interaction.response.send_message(
-            "Tu n'as pas la permission d'utiliser cette commande.", ephemeral=True
-        )
-        return
+Bot Discord permettant de gérer la paye des membres d'un serveur en fonction
+de leur **grade** et des **heures de service** effectuées.
 
-    ancien_nom = role.name
+## 🧩 Fonctionnalités
 
-    if normaliser(ancien_nom) == normaliser(nouveau_nom):
-        await interaction.response.send_message(
-            "Le nouveau nom est identique à l'ancien (à la casse près).", ephemeral=True
-        )
-        return
+- Définir un taux horaire (€/h) pour chaque grade
+- Enregistrer des heures de service pour un membre, sous un grade donné
+- Calculer automatiquement le montant à payer
+- Consulter l'historique des services
+- Marquer les heures comme "payées"
 
-    try:
-        await role.edit(name=nouveau_nom, reason=f"Renommage via /role_renommer par {interaction.user}")
-    except discord.Forbidden:
-        await interaction.response.send_message(
-            "❌ Je n'ai pas la permission de modifier ce rôle. Vérifie que :\n"
-            "- Le bot a la permission **Gérer les rôles**\n"
-            "- Le rôle du bot est placé **au-dessus** de ce rôle dans Paramètres du serveur → Rôles",
-            ephemeral=True,
-        )
-        return
+## 📦 Installation
 
-    messages_suivi = [f"✅ Rôle renommé : **{ancien_nom}** → **{nouveau_nom}**."]
+1. **Installer Python 3.10+** si ce n'est pas déjà fait.
 
-    # Met à jour le grade (taux horaire) si ce rôle correspondait à un grade enregistré
-    grades = get_grades()
-    cle_grade_existante = None
-    for nom_grade in grades:
-        if normaliser(nom_grade) == normaliser(ancien_nom):
-            cle_grade_existante = nom_grade
-            break
+2. **Installer les dépendances** :
+   ```bash
+   pip install -r requirements.txt
+   ```
 
-    if cle_grade_existante is not None:
-        taux = grades.pop(cle_grade_existante)
-        grades[nouveau_nom] = taux
-        set_grades(grades)
-        messages_suivi.append(
-            f"💶 Grade associé mis à jour (taux **{taux:.2f} €/h** conservé)."
-        )
+3. **Créer une application Discord** :
+   - Va sur https://discord.com/developers/applications
+   - Crée une nouvelle application → onglet **Bot** → **Add Bot**
+   - Active l'intent **Server Members Intent** (nécessaire pour `discord.Member`)
+   - Copie le **token** du bot
 
-        # Met à jour l'historique des services déjà enregistrés pour garder la cohérence des payes
-        services = get_services()
-        nb_maj = 0
-        for entrees in services.values():
-            for e in entrees:
-                if e.get("grade") == cle_grade_existante:
-                    e["grade"] = nouveau_nom
-                    nb_maj += 1
-        if nb_maj:
-            set_services(services)
-            messages_suivi.append(f"📜 {nb_maj} entrée(s) de l'historique des services mise(s) à jour.")
+4. **Définir le token en variable d'environnement** :
+   ```bash
+   # Linux / Mac
+   export DISCORD_TOKEN="ton_token_ici"
 
-    # Avertissements pour les noms codés en dur dans bot.py (ne peuvent pas être modifiés automatiquement)
-    if any(normaliser(g) == normaliser(ancien_nom) for g in HIERARCHIE):
-        messages_suivi.append(
-            f"⚠️ Ce rôle fait partie de la **hiérarchie** (/rankup, /derank). Remplace **{ancien_nom}** par "
-            f"**{nouveau_nom}** dans la liste `HIERARCHIE` du fichier `bot.py`, puis redéploie le bot — "
-            "sinon /rankup et /derank ne reconnaîtront plus ce rôle."
-        )
+   # Windows (cmd)
+   set DISCORD_TOKEN=ton_token_ici
 
-    if normaliser(ancien_nom) == normaliser(ROLE_EMS):
-        messages_suivi.append(
-            f"⚠️ Ce rôle est le rôle **EMS** automatique. Mets à jour `ROLE_EMS = \"{nouveau_nom}\"` "
-            "dans `bot.py` et redéploie."
-        )
+   # Windows (PowerShell)
+   $env:DISCORD_TOKEN="ton_token_ici"
+   ```
 
-    if normaliser(ancien_nom) == normaliser(ADMIN_ROLE_NAME):
-        messages_suivi.append(
-            f"⚠️ Ce rôle était le rôle **admin du bot**. Mets à jour "
-            f"`ADMIN_ROLE_NAME = \"{nouveau_nom}\"` dans `bot.py` et redéploie, sinon ses membres "
-            "perdront l'accès aux commandes d'administration."
-        )
+5. **Inviter le bot sur ton serveur** avec les permissions :
+   - `applications.commands`
+   - `bot` avec au minimum : Envoyer des messages, Utiliser les commandes slash
 
-    await interaction.response.send_message("\n".join(messages_suivi))
-  
+   Lien d'invitation type (remplace `CLIENT_ID`) :
+   ```
+   https://discord.com/api/oauth2/authorize?client_id=CLIENT_ID&permissions=2147485696&scope=bot%20applications.commands
+   ```
+
+6. **Lancer le bot** :
+   ```bash
+   python bot.py
+   ```
+
+## ⚙️ Configuration des droits admin
+
+Par défaut, les commandes d'administration (ajout d'heures, gestion des grades,
+validation de paye) sont réservées :
+- aux membres ayant la permission **Administrateur** sur le serveur, **ou**
+- aux membres possédant un rôle nommé **"Admin Paye"**
+
+Tu peux changer ce nom de rôle en modifiant la constante `ADMIN_ROLE_NAME`
+en haut du fichier `bot.py`.
+
+## 📋 Commandes disponibles
+
+| Commande | Description | Accès |
+|---|---|---|
+| `/grade_set <grade> <taux_horaire>` | Crée ou modifie le taux horaire d'un grade | Admin |
+| `/grade_supprimer <grade>` | Supprime un grade | Admin |
+| `/grade_liste` | Affiche tous les grades et leurs taux | Tout le monde |
+| `/service_ajouter <membre> <grade> <heures>` | Ajoute des heures de service à un membre | Admin |
+| `/service_retirer_dernier <membre>` | Annule le dernier service ajouté | Admin |
+| `/paye <membre>` | Calcule la paye due (heures non payées) | Tout le monde |
+| `/paye_historique <membre>` | Affiche l'historique des services | Tout le monde |
+| `/paye_valider <membre>` | Marque les heures comme payées (remise à zéro du compteur) | Admin |
+
+## 💡 Exemple d'utilisation
+
+```
+/grade_set grade:Agent taux_horaire:15
+/grade_set grade:Sergent taux_horaire:20
+/grade_set grade:Capitaine taux_horaire:25
+
+/service_ajouter membre:@Jean grade:Agent heures:3.5
+/service_ajouter membre:@Jean grade:Sergent heures:2
+
+/paye membre:@Jean
+→ Agent : 3.50 h → 52.50 €
+→ Sergent : 2.00 h → 40.00 €
+→ Total : 5.50 h — 92.50 €
+
+/paye_valider membre:@Jean   (remet le compteur à zéro une fois payé)
+```
+
+## 🗂️ Stockage des données
+
+Les données sont sauvegardées automatiquement dans deux fichiers JSON créés
+au même endroit que `bot.py` :
+- `grades.json` : taux horaires par grade
+- `services.json` : historique des heures de service par membre
+
+Aucune base de données externe n'est nécessaire. Pense simplement à ne pas
+supprimer ces fichiers si tu veux conserver l'historique.
+
+## 🔧 Personnalisation possible
+
+- Ajouter une devise différente (remplacer `€` dans `bot.py`)
+- Ajouter un export CSV de la paye
+- Ajouter un système de "fiches de paye" mensuelles automatiques
+- Restreindre les commandes à un salon spécifique
+
+N'hésite pas à demander si tu veux une de ces améliorations !
